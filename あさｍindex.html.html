@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>ドラッグで並べ替え可能な動画リスト</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif; padding: 20px; max-width: 900px; margin: auto; }
+    h1 { margin-bottom: 12px; }
+    #player-container { margin-bottom: 18px; }
+    #videos { display: block; }
+    .video-item {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 8px;
+      border-radius: 8px;
+      background: #fafafa;
+      margin-bottom: 8px;
+      cursor: grab;
+      user-select: none;
+    }
+    .video-item img { width: 160px; height: 90px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+    .video-item p { margin: 0; font-size: 14px; line-height: 1.3; }
+    .video-item.dragging { opacity: 0.5; }
+    .video-item.drag-over { box-shadow: 0 0 0 3px rgba(0,123,255,0.12); }
+    .video-item.playing { border: 2px solid #007bff; background: #f0f8ff; }
+    .small-hint { color: #666; font-size: 13px; margin-bottom: 8px; }
+    @media (max-width:600px){
+      .video-item { flex-direction: row; gap: 10px; }
+      .video-item img { width: 120px; height: 68px; }
+    }
+  </style>
+</head>
+<body>
+  <h1>ドラッグで並べ替え可能な動画リスト</h1>
+  <div class="small-hint">サムネをドラッグ＆ドロップで並べ替え。クリックで再生、再生終了で次へ。</div>
+
+  <div id="player-container"></div>
+  <div id="videos">読み込み中...</div>
+
+  <script>
+    const apiKey = "AIzaSyAxk1YpQSe-qDtFUSUmnjnduanag41Mlyk"; // ← 自分で制限を
+    const playlistId = "PLExT6MVBKs2ByGv9EDeiNSuMZYnFr72Gn";    // ← 最新の再生リストID
+    const container = document.getElementById("videos");
+    const playerContainer = document.getElementById("player-container");
+
+    let videos = [];
+    let currentIndex = -1;
+    let ytPlayer = null;
+    let playingVideoId = null;
+    let isDragging = false;
+
+    (function loadYouTubeAPI(){
+      const tag = document.createElement('script');
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.body.appendChild(tag);
+    })();
+
+    function arrayMove(arr, from, to) {
+      const a = arr.slice();
+      const [item] = a.splice(from, 1);
+      a.splice(to, 0, item);
+      return a;
+    }
+
+    async function fetchAllVideos(pageToken = "", allItems = []) {
+      const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${playlistId}&key=${apiKey}&pageToken=${pageToken}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ? data.error.message : 'API error');
+      if (data.items) allItems = allItems.concat(data.items);
+      if (data.nextPageToken) return fetchAllVideos(data.nextPageToken, allItems);
+      return allItems;
+    }
+
+    function renderList() {
+      container.innerHTML = "";
+      videos.forEach((v, i) => {
+        const div = document.createElement('div');
+        div.className = 'video-item' + (i === currentIndex ? ' playing' : '');
+        div.draggable = true;
+        div.dataset.index = i;
+        div.innerHTML = `
+          <img src="${v.thumbnail}" alt="${escapeHtml(v.title)}" loading="lazy" />
+          <div><p>${escapeHtml(v.title)}</p></div>
+        `;
+
+        div.addEventListener('click', (e) => {
+          if (isDragging) return;
+          playVideoAtIndex(i);
+        });
+
+        div.addEventListener('dragstart', (e) => {
+          isDragging = true;
+          e.dataTransfer.setData('text/plain', String(i));
+          e.dataTransfer.effectAllowed = 'move';
+          div.classList.add('dragging');
+        });
+        div.addEventListener('dragend', () => {
+          isDragging = false;
+          div.classList.remove('dragging');
+        });
+
+        div.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          div.classList.add('drag-over');
+        });
+        div.addEventListener('dragleave', () => {
+          div.classList.remove('drag-over');
+        });
+        div.addEventListener('drop', (e) => {
+          e.preventDefault();
+          div.classList.remove('drag-over');
+          const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+          const to = parseInt(div.dataset.index, 10);
+          if (Number.isNaN(from) || Number.isNaN(to) || from === to) return;
+
+          videos = arrayMove(videos, from, to);
+
+          if (playingVideoId) {
+            const newIdx = videos.findIndex(x => x.videoId === playingVideoId);
+            currentIndex = newIdx >= 0 ? newIdx : -1;
+          } else {
+            currentIndex = -1;
+          }
+
+          renderList();
+        });
+
+        container.appendChild(div);
+      });
+
+      container.addEventListener('dragover', (e) => e.preventDefault());
+      container.addEventListener('drop', (e) => {
+        if (e.target === container) {
+          const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+          if (Number.isNaN(from)) return;
+          videos = arrayMove(videos, from, videos.length - 1);
+          if (playingVideoId) {
+            const newIdx = videos.findIndex(x => x.videoId === playingVideoId);
+            currentIndex = newIdx >= 0 ? newIdx : -1;
+          }
+          renderList();
+        }
+      }, { once: false });
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (m) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;" }[m]));
+    }
+
+    function ensurePlayerElement() {
+      if (!document.getElementById('yt-player')) {
+        playerContainer.innerHTML = '<div id="yt-player"></div>';
+      }
+    }
+
+    function playVideoAtIndex(index) {
+      if (!videos[index]) return;
+      currentIndex = index;
+      playingVideoId = videos[index].videoId;
+      renderList();
+
+      ensurePlayerElement();
+
+      if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
+        ytPlayer.loadVideoById(playingVideoId);
+      } else {
+        ytPlayer = new YT.Player('yt-player', {
+          height: '360',
+          width: '640',
+          videoId: playingVideoId,
+          playerVars: { autoplay: 1, rel: 0 },
+          events: {
+            onStateChange: onPlayerStateChange,
+            onError: (e) => console.warn('YouTube player error', e)
+          }
+        });
+      }
+    }
+
+    function onPlayerStateChange(event) {
+      if (event.data === YT.PlayerState.ENDED) {
+        if (currentIndex + 1 < videos.length) {
+          playVideoAtIndex(currentIndex + 1);
+        }
+      }
+    }
+
+    window.onYouTubeIframeAPIReady = function() {
+      fetchAllVideos().then(items => {
+        videos = items.map(v => ({
+          title: v.snippet.title,
+          videoId: v.snippet.resourceId.videoId,
+          thumbnail: (v.snippet.thumbnails && (v.snippet.thumbnails.medium || v.snippet.thumbnails.default)).url
+        }));
+        if (videos.length === 0) {
+          container.innerText = "動画が見つかりませんでした。";
+          return;
+        }
+        renderList();
+        playVideoAtIndex(0);
+      }).catch(err => {
+        console.error(err);
+        container.innerText = "APIかネットワークでエラーが発生しました。";
+      });
+    };
+  </script>
+</body>
+</html>
